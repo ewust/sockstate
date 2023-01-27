@@ -174,13 +174,27 @@ def has_handshake(pkts):
 
     return (state == 3)
 
+# Assumes that a retransmit has the same sequence as a previous (non-ACK) packet
+# This will miss overlaps / retransmits that are fragments, etc
+def count_retransmits(pkts):
+    rex = 0
+    data_seqs = set()
+    for pkt in pkts:
+        # ignore bare acks
+        if pkt[TCP].flags == 'A':
+            continue
+
+        seq = pkt[TCP].seq
+        if seq in data_seqs:
+            rex += 1
+        data_seqs.add(seq)
+    return rex
 
 
 
 import argparse
 parser = argparse.ArgumentParser()
 
-#-db DATABSE -u USERNAME -p PASSWORD -size 20
 parser.add_argument("host")
 parser.add_argument("-p", "--port", help="Destination port", type=int, default=443)
 args = parser.parse_args()
@@ -193,9 +207,18 @@ try:
     s.connect()
 except Exception as err:
     print(err)
-s.printFlow()
-print(has_handshake(s.pkts))
+#s.printFlow()
+#print(has_handshake(s.pkts))
 
+
+# Experiment B:
+# Send 32 bytes, see if we retransmit
+s.send(b'a'*32)
+
+time.sleep(1)
+
+s.printFlow()
+print('Handshake: %s, Retransmits: %d' % (has_handshake(s.pkts), count_retransmits(s.pkts)))
 
 
 

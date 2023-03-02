@@ -2,6 +2,7 @@ import sockstate
 import argparse
 import os
 import time
+import socket
 
 parser = argparse.ArgumentParser()
 
@@ -12,13 +13,18 @@ args = parser.parse_args()
 s = sockstate.Sock(remote=(args.host, args.port))
 try:
     s.connect()
-except Exception as err:
-    print(err)
 
-s.send(os.urandom(32))
-time.sleep(0.001)
-s.send(os.urandom(8192))
-print(s, s.count_retransmits())
+    s.send(os.urandom(32))
+    time.sleep(0.001)
+    s.send(os.urandom(8192))
+    time.sleep(1)
+    print(s, s.count_retransmits())
+    s.printFlow()
+
+except socket.timeout:
+    print('%s 0 timeout' % (s))
+except Exception as err:
+    print(s, err)
 
 
 

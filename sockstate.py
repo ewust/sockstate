@@ -182,8 +182,7 @@ class Sock(socket.socket):
             elif state == 2 and pkt[TCP].flags == 'A' and pkt[IP].src == client:
                 state = 3
                 break
-
-    return (state == 3)
+        return (state == 3)
 
     def __str__(self):
         return '%s:%d -> %s:%d (%d pkts)' % (self.sip, self.sport, self.dip, self.dport, len(self.pkts))

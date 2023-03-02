@@ -3,6 +3,7 @@ from scapy.all import *
 import random
 import threading
 import time
+import ssl
 
 class PacketListener(object):
 
@@ -64,8 +65,13 @@ class PacketListener(object):
             self.handlePkt(pkt)
 
 
+def get_local_ip():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("1.1.1.1", 80))
+        return s.getsockname()[0]
 
-class Sock(object):
+
+class Sock(socket.socket):
     def __init__(self, remote=('127.0.0.1', 80), sport=None, sip=None, do_connect=False, timeout=1.1):
 
         if sport is None:
@@ -75,12 +81,13 @@ class Sock(object):
 
         self.packetListener = PacketListener()
 
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-        self.s.settimeout(timeout)
-        self.s.bind((sip, sport))
+        #self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
+        super().__init__(socket.AF_INET, socket.SOCK_STREAM, 0)
+        self.settimeout(timeout)
+        self.bind((sip, sport))
 
         # Set our local flow
-        self.sip, self.sport = self.s.getsockname()
+        self.sip, self.sport = self.getsockname()
         self.dip, self.dport = remote
 
         # keep track of packets
@@ -96,16 +103,16 @@ class Sock(object):
         self.packetListener.addConn(self)
 
         # connect
-        self.s.connect((self.dip, self.dport))
+        super().connect((self.dip, self.dport))
 
     def send(self, data):
-        return self.s.send(data)
+        return super().send(data)
 
     def recv(self, blen):
-        return self.s.recv(blen)
+        return super().recv(blen)
 
     def close(self):
-        return self.s.close()
+        return super().close()
 
     def getFlow(self):
         return (self.sip, self.sport, self.dip, self.dport)
@@ -146,81 +153,99 @@ class Sock(object):
 
             print('%s %s (%d, %d)%s' % (direction, pkt[TCP].flags, seq_diff, ack_diff, data))
 
+    # Assumes that a retransmit has the same sequence as a previous (non-ACK) packet
+    # This will miss overlaps / retransmits that are fragments, etc
+    def count_retransmits(self):
+        rex = 0
+        data_seqs = set()
+        for pkt in self.pkts:
+            # ignore bare acks
+            if pkt[TCP].flags == 'A':
+                continue
+
+            seq = pkt[TCP].seq
+            if seq in data_seqs:
+                rex += 1
+            data_seqs.add(seq)
+        return rex
 
 
+    def has_handshake(self):
+        state = 0 # wait-for-SYN, have SYN, have SYN_ACK, have ACK
+        client = None
+        for pkt in self.pkts:
+            if state == 0 and pkt[TCP].flags == 'S':
+                client = pkt[IP].src
+                state = 1 # have SYN
+            elif state == 1 and pkt[TCP].flags == 'SA' and pkt[IP].dst == client:
+                state = 2 # have SYN_ACK
+            elif state == 2 and pkt[TCP].flags == 'A' and pkt[IP].src == client:
+                state = 3
+                break
+
+    return (state == 3)
+
+    def __str__(self):
+        return '%s:%d -> %s:%d (%d pkts)' % (self.sip, self.sport, self.dip, self.dport, len(self.pkts))
 
     def __del__(self):
         self.packetListener.delConn(self)
 
 
-def get_local_ip():
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s.connect(("1.1.1.1", 80))
-        return s.getsockname()[0]
 
+def stop():
+    PacketListener().stop()
 
-def has_handshake(pkts):
-    state = 0 # wait-for-SYN, have SYN, have SYN_ACK, have ACK
-    client = None
-    for pkt in pkts:
-        if state == 0 and pkt[TCP].flags == 'S':
-            client = pkt[IP].src
-            state = 1 # have SYN
-        elif state == 1 and pkt[TCP].flags == 'SA' and pkt[IP].dst == client:
-            state = 2 # have SYN_ACK
-        elif state == 2 and pkt[TCP].flags == 'A' and pkt[IP].src == client:
-            state = 3
-            break
-
-    return (state == 3)
-
-# Assumes that a retransmit has the same sequence as a previous (non-ACK) packet
-# This will miss overlaps / retransmits that are fragments, etc
-def count_retransmits(pkts):
-    rex = 0
-    data_seqs = set()
-    for pkt in pkts:
-        # ignore bare acks
-        if pkt[TCP].flags == 'A':
-            continue
-
-        seq = pkt[TCP].seq
-        if seq in data_seqs:
-            rex += 1
-        data_seqs.add(seq)
-    return rex
-
-
-
-import argparse
-parser = argparse.ArgumentParser()
-
-parser.add_argument("host")
-parser.add_argument("-p", "--port", help="Destination port", type=int, default=443)
-args = parser.parse_args()
-
-
-# Experiment A:
-# Connect to server, verify that it connects (SYN, SYN-ACK, ACK)
-s = Sock(remote=(args.host, args.port))
-try:
-    s.connect()
-except Exception as err:
-    print(err)
-#s.printFlow()
-#print(has_handshake(s.pkts))
-
-
-# Experiment B:
-# Send 32 bytes, see if we retransmit
-s.send(b'a'*32)
-
-time.sleep(1)
-
-s.printFlow()
-print('Handshake: %s, Retransmits: %d' % (has_handshake(s.pkts), count_retransmits(s.pkts)))
-
-
-
-# Stop capturing
-PacketListener().stop()
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument("host")
+    parser.add_argument("-p", "--port", help="Destination port", type=int, default=443)
+    parser.add_argument("-s", "--sni", help="SNI of the host", default="example.com")
+    args = parser.parse_args()
+    
+    
+    # Experiment 1:
+    # Connect to server, verify that it connects (SYN, SYN-ACK, ACK)
+    s = Sock(remote=(args.host, args.port))
+    try:
+        s.connect()
+    except Exception as err:
+        print(err)
+    #s.printFlow()
+    #print(has_handshake(s.pkts))
+    
+    
+    # Experiment 2:
+    # Send 32 bytes, see if we retransmit
+    s.send(b'a'*32)
+    
+    time.sleep(1)
+    
+    s.printFlow()
+    print('Handshake: %s, Retransmits: %d' % (s.has_handshake(), s.count_retransmits()))
+    
+    
+    print('-------')
+    # Experiment 3:
+    # Talk TLS
+    s = Sock(remote=(args.host, args.port))
+    try:
+        s.connect()
+    except Exception as err:
+        print(err)
+    
+    hostname = args.sni
+    context = ssl.create_default_context()
+    with context.wrap_socket(s, server_hostname=hostname) as ssock:
+        print('TLS version: ', ssock.version)
+    
+    s.printFlow()
+    print('Handshake: %s, Retransmits: %d' % (s.has_handshake(), s.count_retransmits()))
+    
+    
+    
+    
+    # Stop capturing
+    PacketListener().stop()

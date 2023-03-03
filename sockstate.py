@@ -92,6 +92,7 @@ class Sock(socket.socket):
 
         # keep track of packets
         self.pkts = []
+        self.times = []
 
         if do_connect:
             self.connect(remote)
@@ -120,6 +121,7 @@ class Sock(socket.socket):
     # assumes IP layer packets
     def handlePkt(self, pkt):
         self.pkts += pkt
+        self.times.append(time.time())
 
     def printPkts(self):
         print('%s:%d -> %s:%d:' % (self.sip, self.sport, self.dip, self.dport))
@@ -139,7 +141,11 @@ class Sock(socket.socket):
                 srv_isn = pkt[TCP].seq
 
             direction = '->' if pkt[IP].src == client else '  <-'
-            data = ' +%d' % len(pkt[TCP].payload) if len(pkt[TCP].payload) > 0 else ''
+            pl = pkt[TCP].payload
+            data = ' +%d' % len(pl) if len(pl) > 0 and type(pl) is not Padding else ''
+            if cli_isn is None:
+                print("%s %s ? %s" % (direction, pkt[TCP].flags, data))
+                continue
 
             seq = pkt[TCP].seq
             ack = pkt[TCP].ack
@@ -183,6 +189,20 @@ class Sock(socket.socket):
                 state = 3
                 break
         return (state == 3)
+
+    def get_hs_rtt(self):
+        client = None
+        last_syn_t = None
+        for t,pkt in zip(self.times, self.pkts):
+            if client is None and pkt[TCP].flags == 'S':
+                client = pkt[IP].src
+            if pkt[IP].src == client and pkt[TCP].flags == 'S':
+                last_syn_t = t
+            if pkt[TCP].flags == 'SA' and pkt[IP].dst == client:
+                return (t - last_syn_t)
+        return None
+
+            
 
     def __str__(self):
         return '%s:%d -> %s:%d (%d pkts)' % (self.sip, self.sport, self.dip, self.dport, len(self.pkts))
